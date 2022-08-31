@@ -1,0 +1,16 @@
+**.pyc
+**.pt
+**.bin
+**.idx
+**.log
+**.pkl
+**.npy
+**.csv
+**.bpe
+**.DS_Store
+**.label
+**.input0
+*/*/runs/
+*/*/*-bin/
+**.pdf
+**.json
