@@ -155,7 +155,7 @@ class CommonsenseRNNCell(nn.Module):
 class CommonsenseRNN(nn.Module):
 
     def __init__(self, D_m, D_s, D_g, D_p, D_r, D_i, D_e, listener_state=False,
-                            context_attention='simple', D_a=100, dropout=0.5, emo_gru=True):
+                            context_attention='simple', D_a=100, dropout=0.5, emo_gru=True, model_args=None):
         super(CommonsenseRNN, self).__init__()
 
         self.D_m = D_m
@@ -168,6 +168,11 @@ class CommonsenseRNN(nn.Module):
 
         self.dialogue_cell = CommonsenseRNNCell(D_m, D_s, D_g, D_p, D_r, D_i, D_e,
                             listener_state, context_attention, D_a, dropout, emo_gru)
+
+        self.args = model_args
+        if self.args is not None and not self.args.no_self_attn_emotions:
+            self.emo_attention_dep = nn.TransformerEncoderLayer(d_model=D_e, nhead=2, batch_first=False)
+        
 
     def forward(self, U, x1, x2, x3, o1, o2, qmask):
         """
@@ -194,6 +199,11 @@ class CommonsenseRNN(nn.Module):
             
             if type(alpha_)!=type(None):
                 alpha.append(alpha_[:,0,:])
+        
+        # add dependency between emotions 
+        if self.args is not None and not self.args.no_self_attn_emotions:
+            mask__ = (torch.sum(qmask, dim=2) == 0).transpose(0, 1)
+            e = self.emo_attention_dep(e, src_key_padding_mask=mask__)
 
         return e, alpha # seq_len, batch, D_e
 
@@ -201,7 +211,7 @@ class CommonsenseRNN(nn.Module):
 class CommonsenseGRUModel(nn.Module):
 
     def __init__(self, D_m, D_s, D_g, D_p, D_r, D_i, D_e, D_h, D_a=100, n_classes=7, listener_state=False, 
-        context_attention='simple', dropout_rec=0.5, dropout=0.1, emo_gru=True, mode1=0, norm=0, residual=False):
+        context_attention='simple', dropout_rec=0.5, dropout=0.1, emo_gru=True, mode1=0, norm=0, residual=False,args=None):
 
         super(CommonsenseGRUModel, self).__init__()
 
@@ -233,12 +243,18 @@ class CommonsenseGRUModel(nn.Module):
         self.dropout   = nn.Dropout(dropout)
         self.dropout_rec = nn.Dropout(dropout_rec)
         self.cs_rnn_f = CommonsenseRNN(D_h, D_s, D_g, D_p, D_r, D_i, D_e, listener_state,
-                                       context_attention, D_a, dropout_rec, emo_gru)
+                                       context_attention, D_a, dropout_rec, emo_gru, args)
         self.cs_rnn_r = CommonsenseRNN(D_h, D_s, D_g, D_p, D_r, D_i, D_e, listener_state,
-                                       context_attention, D_a, dropout_rec, emo_gru)
+                                       context_attention, D_a, dropout_rec, emo_gru, args)
         self.sense_gru = nn.GRU(input_size=D_s, hidden_size=D_s//2, num_layers=1, bidirectional=True)
-        self.matchatt = MatchingAttention(2*D_e,2*D_e,att_type='general2')
-        self.linear     = nn.Linear(2*D_e, D_h)
+
+        self._num_features = 2
+        self.matchatt = MatchingAttention(self._num_features*D_e,self._num_features*D_e,att_type='general2')
+        # self.sense_transformer = nn.TransformerEncoderLayer(d_model=D_s, nhead=4, batch_first=False)
+        # self.personality_encoder_layer = nn.TransformerEncoderLayer(d_model=self._num_features*D_e, nhead=4, batch_first=False)
+        self.args = args
+
+        self.linear     = nn.Linear(self._num_features*D_e, D_h)
         self.smax_fc    = nn.Linear(D_h, n_classes)
 
     def _reverse_seq(self, X, mask):
@@ -304,6 +320,7 @@ class CommonsenseGRUModel(nn.Module):
         emotions_f, alpha_f = self.cs_rnn_f(r, x1, x2, x3, o1, o2, qmask)
         
         out_sense, _ = self.sense_gru(x1)
+        # out_sense = self.sense_transformer(out_sense,  src_key_padding_mask=(umask==0))
         
         rev_r = self._reverse_seq(r, umask)
         rev_x1 = self._reverse_seq(x1, umask)
@@ -318,6 +335,10 @@ class CommonsenseGRUModel(nn.Module):
         emotions = torch.cat([emotions_f,emotions_b],dim=-1)
         emotions = self.dropout_rec(emotions)
         
+        # [checking]
+        # if not self.args.no_self_attn_emotions:
+        #     emotions = self.personality_encoder_layer(emotions, src_key_padding_mask=(umask==0))
+
         alpha, alpha_f, alpha_b = [], [], []
         if att2:
             att_emotions = []

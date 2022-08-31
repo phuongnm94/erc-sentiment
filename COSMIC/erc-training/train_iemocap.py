@@ -8,6 +8,7 @@ from dataloader import IEMOCAPRobertaCometDataset
 from model import MaskedNLLLoss
 from commonsense_model import CommonsenseGRUModel
 from sklearn.metrics import f1_score, accuracy_score
+import os
 
 def seed_everything(seed):
     random.seed(seed)
@@ -58,7 +59,26 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
     for data in dataloader:
         if train:
             optimizer.zero_grad()
-            
+        
+        """
+        torch.FloatTensor(self.roberta1[vid]),\
+        torch.FloatTensor(self.roberta2[vid]),\
+        torch.FloatTensor(self.roberta3[vid]),\
+        torch.FloatTensor(self.roberta4[vid]),\
+        torch.FloatTensor(self.xIntent[vid]),\
+        torch.FloatTensor(self.xAttr[vid]),\
+        torch.FloatTensor(self.xNeed[vid]),\
+        torch.FloatTensor(self.xWant[vid]),\
+        torch.FloatTensor(self.xEffect[vid]),\
+        torch.FloatTensor(self.xReact[vid]),\
+        torch.FloatTensor(self.oWant[vid]),\
+        torch.FloatTensor(self.oEffect[vid]),\
+        torch.FloatTensor(self.oReact[vid]),\
+        torch.FloatTensor([[1,0] if x=='M' else [0,1] for x in self.speakers[vid]]),\
+        torch.FloatTensor([1]*len(self.labels[vid])),\
+        torch.LongTensor(self.labels[vid]),\
+        vid
+        """
         r1, r2, r3, r4, \
         x1, x2, x3, x4, x5, x6, \
         o1, o2, o3, \
@@ -81,7 +101,8 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
             total_loss.backward()
             if args.tensorboard:
                 for param in model.named_parameters():
-                    writer.add_histogram(param[0], param[1].grad, epoch)
+                    if param[0] is not None and param[1].grad is not None:
+                        writer.add_histogram(param[0], param[1].grad, epoch)
             optimizer.step()
         else:
             alphas += alpha
@@ -124,6 +145,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=100, metavar='seed', help='seed')
     parser.add_argument('--norm', type=int, default=3, help='normalization strategy')
     parser.add_argument('--residual', action='store_true', default=False, help='use residual connection')
+    parser.add_argument('--no-self-attn-emotions', action='store_true', default=False, help='use self attn in emotions chain')
 
     args = parser.parse_args()
     print(args)
@@ -136,7 +158,7 @@ if __name__ == '__main__':
 
     if args.tensorboard:
         from tensorboardX import SummaryWriter
-        writer = SummaryWriter()
+        writer = SummaryWriter(logdir="runs/iemocap:noselfemo-{}:seed-{}:dr-{}".format(args.no_self_attn_emotions, args.seed, args.dropout))
 
     emo_gru = True
     n_classes  = 6
@@ -159,7 +181,7 @@ if __name__ == '__main__':
 
     global seed
     seed = args.seed
-    # seed_everything(seed)
+    seed_everything(seed)
     
     model = CommonsenseGRUModel(D_m, D_s, D_g, D_p, D_r, D_i, D_e, D_h, D_a,
                                 n_classes=n_classes,
@@ -170,7 +192,8 @@ if __name__ == '__main__':
                                 emo_gru=emo_gru,
                                 mode1=args.mode1,
                                 norm=args.norm,
-                                residual=args.residual)
+                                residual=args.residual,
+                                args=args)
 
     print ('IEMOCAP COSMIC Model.')
 
@@ -213,13 +236,35 @@ if __name__ == '__main__':
         test_fscores.append(test_fscore)
         
         if args.tensorboard:
-            writer.add_scalar('test: accuracy/loss', test_acc/test_loss, e)
-            writer.add_scalar('train: accuracy/loss', train_acc/train_loss, e)
+            writer.add_scalar('valid/accuracy', valid_acc, e)
+            writer.add_scalar('valid/loss', valid_loss, e)
+            writer.add_scalar('valid/f1score', valid_fscore, e)
+
+            writer.add_scalar('test/accuracy', test_acc, e)
+            writer.add_scalar('test/loss', test_loss, e)
+            writer.add_scalar('test/f1score', test_fscore, e)
+
+            writer.add_scalar('train/accuracy', train_acc, e)
+            writer.add_scalar('train/loss', train_loss, e)
+            writer.add_scalar('train/f1score', train_fscore, e)
             
         x = 'epoch: {}, train_loss: {}, acc: {}, fscore: {}, valid_loss: {}, acc: {}, fscore: {}, test_loss: {}, acc: {}, fscore: {}, time: {} sec'.format(e+1, train_loss, train_acc, train_fscore, valid_loss, valid_acc, valid_fscore, test_loss, test_acc, test_fscore, round(time.time()-start_time, 2))
         
         print (x)
         lf.write(x + '\n')
+
+        def mkdir_fol():
+            try:
+                os.mkdir('models/')
+            except OSError as error:
+                print(error)  
+
+        if valid_fscore > valid_fscores[0][np.argmax(valid_fscores[0])]:
+            mkdir_fol()
+            torch.save(model, open('models/best_fscore.pt', 'wb'))
+        if valid_loss < valid_losses[np.argmin(valid_losses)]:
+            mkdir_fol()
+            torch.save(model, open('models/min_loss.pt', 'wb'))
                
     if args.tensorboard:
         writer.close()
