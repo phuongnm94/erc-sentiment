@@ -10,7 +10,7 @@ This code is based on open-source [conv-emotion](https://github.com/declare-lab/
 ### Python Environment 
 
 ```bash 
-conda env create --prefix env-erc/ python=3.7
+conda create --prefix env-erc/ python=3.7
 conda activate ./env-erc/
 
 pip install torch==1.11.0+cu115 torchaudio==0.11.0+cu115 torchvision==0.12.0+cu115 --extra-index-url https://download.pytorch.org/whl/cu115

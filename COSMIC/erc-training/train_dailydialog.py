@@ -175,7 +175,7 @@ if __name__ == '__main__':
 
     global seed
     seed = args.seed
-    # seed_everything(seed)
+    seed_everything(seed)
     
     model = CommonsenseGRUModel(D_m, D_s, D_g, D_p, D_r, D_i, D_e, D_h, D_a,
                                 n_classes=n_classes,
