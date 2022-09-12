@@ -5,6 +5,9 @@ from torch.autograd import Variable
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np, itertools, random, copy, math
 from model import SimpleAttention, MatchingAttention, Attention
+import seaborn as sns
+import matplotlib.pyplot as plt
+import os
 
 class CommonsenseRNNCell(nn.Module):
 
@@ -151,6 +154,95 @@ class CommonsenseRNNCell(nn.Module):
         
         return g_, q_, r_, i_, e_, alpha
 
+class MyTransformerEncoderLayer(nn.TransformerEncoderLayer):
+
+    
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, additional_info=None):
+        r"""Pass the input through the encoder layer.
+
+        Args:
+            src: the sequence to the encoder layer (required).
+            src_mask: the mask for the src sequence (optional).
+            src_key_padding_mask: the mask for the src keys per batch (optional).
+
+        Shape:
+            see the docs in Transformer class.
+        """
+
+        # see Fig. 1 of https://arxiv.org/pdf/2002.04745v1.pdf
+
+        x = src
+        if self.norm_first:
+            x = x + MyTransformerEncoderLayer._sa_block(self, self.norm1(x), src_mask, src_key_padding_mask, additional_info)
+            x = x + self._ff_block(self.norm2(x))
+        else:
+            x = self.norm1(x + MyTransformerEncoderLayer._sa_block(self, x, src_mask, src_key_padding_mask, additional_info))
+            x = self.norm2(x + self._ff_block(x))
+
+        return x
+
+    # self-attention block
+    def _sa_block(self, x,
+                  attn_mask, key_padding_mask, additional_info=None):
+
+        x, attn_weights = self.self_attn(x, x, x,
+                           attn_mask=attn_mask,
+                           key_padding_mask=key_padding_mask,
+                           need_weights=True, average_attn_weights=False) 
+
+        for s_id in range(key_padding_mask.shape[0]):
+            
+            if ( attn_weights[s_id] > 0.035).sum() == 0:
+                continue
+            print(s_id)
+            if additional_info is not None:
+                sentences_map = additional_info['sentences'][s_id]
+                
+            s_len = sum(~key_padding_mask[s_id])
+            y_stick = sentences_map
+            x_stick = ["u{}".format(e+1) for e in range(s_len)]
+            attn_weights[s_id][0, :s_len, :s_len] = attn_weights[s_id][0, :s_len, :s_len] + attn_weights[s_id][1, :s_len, :s_len]
+            viz_attention('logs/', 'images', ((attn_weights[s_id][:, :s_len, :s_len])*5) .unsqueeze(0).cpu().detach(), 
+                        x_stick, y_stick, 0.25, sent_number="{}".format(s_id))
+
+        return self.dropout1(x)
+
+
+
+def draw(data, x, y, ax):
+    sns.heatmap(data,
+                    xticklabels=x, square=True, yticklabels=y, vmin=0.0, vmax=1.0,
+                    cmap='Blues', robust=True, cbar=False, ax=ax, annot=False, fmt=".2f", annot_kws={"size": 6})
+
+
+def viz_attention(self_attn_folder_save, folder_name, self_attn_data, x_stick, y_stick, base_cell, sent_number=""):
+
+    fig, axs = plt.subplots(self_attn_data.size(0), self_attn_data.size(1),
+                            figsize=(20, 10))
+    if self_attn_data.size(1) > 1:
+        fig.suptitle('Self attention Sentence {}, {} layers, {} heads'.format(sent_number,
+                                                                              self_attn_data.size(0),
+                                                                              self_attn_data.size(1)
+                                                                              ))
+    else:
+        fig.suptitle('Attention Sentence {} '.format(sent_number))
+
+    for layer in range(0, self_attn_data.size(0)):
+        for h in range(self_attn_data.size(1)):
+            draw(self_attn_data[layer][h],
+                 x_stick if layer == self_attn_data.size(0) - 1 else [],
+                 y_stick if h == 0 else [],
+                 ax=axs[h])
+
+    if not os.path.isdir("{}/{}".format(self_attn_folder_save, folder_name)):
+        os.mkdir("{}/{}".format(self_attn_folder_save, folder_name))
+    plt.savefig('{}/{}/sent-{}.pdf'.format(self_attn_folder_save, folder_name, sent_number),
+                bbox_inches='tight',
+                pad_inches=1)
+
+    # plt.savefig('{}/{}/sent-{}.png'.format(self_attn_folder_save, folder_name, sent_number), dpi=300)
+    plt.close()
+
 
 class CommonsenseRNN(nn.Module):
 
@@ -174,7 +266,7 @@ class CommonsenseRNN(nn.Module):
             self.emo_attention_dep = nn.TransformerEncoderLayer(d_model=D_e, nhead=2, batch_first=False)
         
 
-    def forward(self, U, x1, x2, x3, o1, o2, qmask):
+    def forward(self, U, x1, x2, x3, o1, o2, qmask, self_attn_print=False, additional_info=None):
         """
         U -> seq_len, batch, D_m
         x1, x2, x3, o1, o2 -> seq_len, batch, D_s
@@ -199,11 +291,15 @@ class CommonsenseRNN(nn.Module):
             
             if type(alpha_)!=type(None):
                 alpha.append(alpha_[:,0,:])
-        
+
         # add dependency between emotions 
         if self.args is not None and not self.args.no_self_attn_emotions:
             mask__ = (torch.sum(qmask, dim=2) == 0).transpose(0, 1)
-            e = self.emo_attention_dep(e, src_key_padding_mask=mask__)
+            if not self_attn_print:
+                e = self.emo_attention_dep(e, src_key_padding_mask=mask__)
+            else:
+                e = MyTransformerEncoderLayer.forward(self.emo_attention_dep, e, src_key_padding_mask=mask__, additional_info=additional_info)
+            # print(e1)
 
         return e, alpha # seq_len, batch, D_e
 
@@ -271,7 +367,7 @@ class CommonsenseGRUModel(nn.Module):
             xfs.append(xf)
         return pad_sequence(xfs)
 
-    def forward(self, r1, r2, r3, r4, x1, x2, x3, o1, o2, qmask, umask, att2=False, return_hidden=False):
+    def forward(self, r1, r2, r3, r4, x1, x2, x3, o1, o2, qmask, umask, att2=False, return_hidden=False, additional_info=None):
         """
         U -> seq_len, batch, D_m
         qmask -> seq_len, batch, party
@@ -317,7 +413,7 @@ class CommonsenseGRUModel(nn.Module):
             
         r = self.linear_in(r)
         
-        emotions_f, alpha_f = self.cs_rnn_f(r, x1, x2, x3, o1, o2, qmask)
+        emotions_f, alpha_f = self.cs_rnn_f(r, x1, x2, x3, o1, o2, qmask, self_attn_print=not self.args.no_print_self_attn, additional_info=additional_info)
         
         out_sense, _ = self.sense_gru(x1)
         # out_sense = self.sense_transformer(out_sense,  src_key_padding_mask=(umask==0))

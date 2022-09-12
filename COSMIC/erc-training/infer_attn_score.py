@@ -1,23 +1,10 @@
-import numpy as np, argparse, time, pickle, random
+import numpy as np, argparse, time
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.nn import functional as F
 from dataloader import IEMOCAPRobertaCometDataset
 from model import MaskedNLLLoss
 from commonsense_model import CommonsenseGRUModel
 from sklearn.metrics import f1_score, accuracy_score
-import os
-
-def seed_everything(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
 
 def get_IEMOCAP_loaders(batch_size=32, num_workers=0, pin_memory=False):
     trainset = IEMOCAPRobertaCometDataset('train')
@@ -44,21 +31,14 @@ def get_IEMOCAP_loaders(batch_size=32, num_workers=0, pin_memory=False):
 
     return train_loader, valid_loader, test_loader
 
-def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None, train=False):
+def infer(model, loss_function, dataloader):
     losses, preds, labels, masks, losses_sense  = [], [], [], [], []
     alphas, alphas_f, alphas_b, vids = [], [], [], []
     max_sequence_len = []
 
-    assert not train or optimizer!=None
-    if train:
-        model.train()
-    else:
-        model.eval()
+    model.eval()
 
-    seed_everything(seed)
     for data in dataloader:
-        if train:
-            optimizer.zero_grad()
         
         """
         torch.FloatTensor(self.roberta1[vid]),\
@@ -83,8 +63,17 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
         x1, x2, x3, x4, x5, x6, \
         o1, o2, o3, \
         qmask, umask, label = [d.cuda() for d in data[:-1]] if cuda else data[:-1]
-        
-        log_prob, _, alpha, alpha_f, alpha_b, _ = model(r1, r2, r3, r4, x5, x6, x1, o2, o3, qmask, umask, att2=True)
+
+        s_ids = data[-1]
+        lb_mapping = {'happy':0, 'sad':1, 'neutral':2, 'angry':3, 'excited':4, 'frustrated':5}
+        label_mapping = ['']*len(lb_mapping)
+        for e,v in lb_mapping.items():
+            label_mapping[v] = e
+        conversation_map = [["person {}: ".format(torch.argmax(qmask.transpose(0,1)[i][j])+1) + s + " [u{}, {}]".format(j+1, label_mapping[label[i][j]]) 
+                                for j, s in enumerate(dataloader.dataset.sentences[s_id])
+                            ] for i, s_id in enumerate(s_ids)]
+
+        log_prob, _, alpha, alpha_f, alpha_b, _ = model(r1, r2, r3, r4, x5, x6, x1, o2, o3, qmask, umask, att2=True, additional_info= {'sentences': conversation_map})
 
         lp_ = log_prob.transpose(0,1).contiguous().view(-1, log_prob.size()[2]) # batch*seq_len, n_classes
         labels_ = label.view(-1) # batch*seq_len
@@ -95,20 +84,11 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
         labels.append(labels_.data.cpu().numpy())
         masks.append(umask.view(-1).cpu().numpy())
         losses.append(loss.item()*masks[-1].sum())
-
-        if train:
-            total_loss = loss
-            total_loss.backward()
-            if args.tensorboard:
-                for param in model.named_parameters():
-                    if param[0] is not None and param[1].grad is not None:
-                        writer.add_histogram(param[0], param[1].grad, epoch)
-            optimizer.step()
-        else:
-            alphas += alpha
-            alphas_f += alpha_f
-            alphas_b += alpha_b
-            vids += data[-1]
+ 
+        alphas += alpha
+        alphas_f += alpha_f
+        alphas_b += alpha_b
+        vids += data[-1]
 
     if preds!=[]:
         preds  = np.concatenate(preds)
@@ -146,6 +126,8 @@ if __name__ == '__main__':
     parser.add_argument('--norm', type=int, default=3, help='normalization strategy')
     parser.add_argument('--residual', action='store_true', default=False, help='use residual connection')
     parser.add_argument('--no-self-attn-emotions', action='store_true', default=False, help='use self attn in emotions chain')
+    parser.add_argument('--model_path', default='./COSMIC/erc-training/models/best_fscore2.pt', help='path of the pretrained model')
+    parser.add_argument('--no_print_self_attn', action='store_false', default=True, help='reverse flag print attention score')
 
     args = parser.parse_args()
     print(args)
@@ -155,10 +137,6 @@ if __name__ == '__main__':
         print('Running on GPU')
     else:
         print('Running on CPU')
-
-    if args.tensorboard:
-        from tensorboardX import SummaryWriter
-        writer = SummaryWriter(logdir="runs/iemocap:noselfemo-{}:seed-{}:dr-{}".format(args.no_self_attn_emotions, args.seed, args.dropout))
 
     emo_gru = True
     n_classes  = 6
@@ -178,10 +156,6 @@ if __name__ == '__main__':
     D_a = 100
 
     D_e = D_p + D_r + D_i
-
-    global seed
-    seed = args.seed
-    seed_everything(seed)
     
     model = CommonsenseGRUModel(D_m, D_s, D_g, D_p, D_r, D_i, D_e, D_h, D_a,
                                 n_classes=n_classes,
@@ -194,7 +168,11 @@ if __name__ == '__main__':
                                 norm=args.norm,
                                 residual=args.residual,
                                 args=args)
-
+    if args.model_path is not None and len(args.model_path) > 0:
+        model = torch.load(open(args.model_path, 'rb'))
+        if not hasattr(model.args, 'no_print_self_attn'):
+            model.args.no_print_self_attn = args.no_print_self_attn
+    
     print ('IEMOCAP COSMIC Model.')
 
 
@@ -213,75 +191,29 @@ if __name__ == '__main__':
     else:
         loss_function = MaskedNLLLoss()
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
-    
-    lf = open('logs/cosmic_iemocap_logs.txt', 'a')
 
     train_loader, valid_loader, test_loader = get_IEMOCAP_loaders(batch_size=batch_size,
                                                                   num_workers=0)
 
-    valid_losses, valid_fscores = [], []
     test_fscores, test_losses = [], []
     best_loss, best_label, best_pred, best_mask = None, None, None, None
 
-    for e in range(n_epochs):
-        start_time = time.time()
-        train_loss, train_acc, _, _, _, train_fscore, _ = train_or_eval_model(model, loss_function, train_loader, e, optimizer, True)
-        valid_loss, valid_acc, _, _, _, valid_fscore, _ = train_or_eval_model(model, loss_function, valid_loader, e)
-        test_loss, test_acc, test_label, test_pred, test_mask, test_fscore, attentions = train_or_eval_model(model, loss_function, test_loader, e)
-            
-        valid_losses.append(valid_loss)
-        valid_fscores.append(valid_fscore)
-        test_losses.append(test_loss)
-        test_fscores.append(test_fscore)
+    start_time = time.time()
+    # for data in test_loader:
+    #     print(data)
+    #     # break 
+    #     # print(1/0)
+
+    test_loss, test_acc, test_label, test_pred, test_mask, test_fscore, attentions = infer(model, loss_function, test_loader)
         
-        if args.tensorboard:
-            writer.add_scalar('valid/accuracy', valid_acc, e)
-            writer.add_scalar('valid/loss', valid_loss, e)
-            writer.add_scalar('valid/f1score', valid_fscore, e)
+    test_losses.append(test_loss)
+    test_fscores.append(test_fscore)
+    
+    x = 'test-eval:   test_loss: {}, acc: {}, fscore: {}, time: {} sec'.format(test_loss, test_acc, test_fscore, round(time.time()-start_time, 2))
+    
+    print(x)
 
-            writer.add_scalar('test/accuracy', test_acc, e)
-            writer.add_scalar('test/loss', test_loss, e)
-            writer.add_scalar('test/f1score', test_fscore, e)
-
-            writer.add_scalar('train/accuracy', train_acc, e)
-            writer.add_scalar('train/loss', train_loss, e)
-            writer.add_scalar('train/f1score', train_fscore, e)
-            
-        x = 'epoch: {}, train_loss: {}, acc: {}, fscore: {}, valid_loss: {}, acc: {}, fscore: {}, test_loss: {}, acc: {}, fscore: {}, time: {} sec'.format(e+1, train_loss, train_acc, train_fscore, valid_loss, valid_acc, valid_fscore, test_loss, test_acc, test_fscore, round(time.time()-start_time, 2))
-        
-        print (x)
-        lf.write(x + '\n')
-
-        def mkdir_fol():
-            try:
-                os.mkdir('models/')
-            except OSError as error:
-                print(error)  
-
-        if valid_fscore >= valid_fscores[0][np.argmax(valid_fscores[0])]:
-            mkdir_fol()
-            torch.save(model, open('models/best_fscore.pt', 'wb'))
-        if valid_loss <= valid_losses[np.argmin(valid_losses)]:
-            mkdir_fol()
-            torch.save(model, open('models/min_loss.pt', 'wb'))
                
-    if args.tensorboard:
-        writer.close()
         
-    valid_fscores = np.array(valid_fscores).transpose()
-    test_fscores = np.array(test_fscores).transpose()
-    
-    score1 = test_fscores[0][np.argmin(valid_losses)]
-    score2 = test_fscores[0][np.argmax(valid_fscores[0])]
-    scores = [score1, score2]
-    scores = [str(item) for item in scores]
-    
-    print ('Test Scores: Weighted F1')
-    print('@Best Valid Loss: {}'.format(score1))
-    print('@Best Valid F1: {}'.format(score2))
 
-    rf = open('results/cosmic_iemocap_results.txt', 'a')
-    rf.write('\t'.join(scores) + '\t' + str(args) + '\n')
-    rf.close()
     
