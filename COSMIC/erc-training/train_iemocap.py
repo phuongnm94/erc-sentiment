@@ -45,6 +45,9 @@ def get_IEMOCAP_loaders(batch_size=32, num_workers=0, pin_memory=False):
     return train_loader, valid_loader, test_loader
 
 def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None, train=False):
+    # ==============
+    # variables to save all the values of training process
+    # ==============
     losses, preds, labels, masks, losses_sense  = [], [], [], [], []
     alphas, alphas_f, alphas_b, vids = [], [], [], []
     max_sequence_len = []
@@ -53,13 +56,29 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
     if train:
         model.train()
     else:
-        model.eval()
+        model.eval() ### for remove the affect of dropout in infer process 
 
+    # ==============
+    # seed function is used to get the same result between different runs.
+    # ==============
     seed_everything(seed)
-    for data in dataloader:
+
+    # ==============
+    # each iterator is a minibatch,
+    # ==============
+    for data in dataloader:  ### data variable will save all data in a minibatch 
         if train:
             optimizer.zero_grad()
         
+        # ==============
+        # LOAD DATA
+        # ==============
+        # check the order of variables in here to know the type of data. 
+        # r1, r2, r3, r4 => self.roberta1, self.roberta2, self.roberta3, self.roberta4  is the hidden states of utterances encoded by 4 layer in pretrained Roberta.
+        #                 => remember that, COSMIC framework using pretrained roberta for encoding source sentence without considering context information (check COSMIC paper).
+        #            where vid (video id) is a sample id of conversation 
+        # x1, ... x5, x6, => xIntent, ... xEffect, self.roberta3, xReact [vid]
+        # ==============
         """
         torch.FloatTensor(self.roberta1[vid]),\
         torch.FloatTensor(self.roberta2[vid]),\
@@ -84,12 +103,21 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
         o1, o2, o3, \
         qmask, umask, label = [d.cuda() for d in data[:-1]] if cuda else data[:-1]
         
+        # ============== 
+        # FORWARD data to model. 
+        # ==============
         log_prob, _, alpha, alpha_f, alpha_b, _ = model(r1, r2, r3, r4, x5, x6, x1, o2, o3, qmask, umask, att2=True)
 
+        # ============== 
+        # compute LOSSES 
+        # ==============
         lp_ = log_prob.transpose(0,1).contiguous().view(-1, log_prob.size()[2]) # batch*seq_len, n_classes
         labels_ = label.view(-1) # batch*seq_len
         loss = loss_function(lp_, labels_, umask)
 
+        # ============== 
+        # logging
+        # ==============
         pred_ = torch.argmax(lp_,1) # batch*seq_len
         preds.append(pred_.data.cpu().numpy())
         labels.append(labels_.data.cpu().numpy())
@@ -97,9 +125,12 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
         losses.append(loss.item()*masks[-1].sum())
 
         if train:
+            # ============== 
+            # BACKWARD loss for updating weights
+            # ==============
             total_loss = loss
             total_loss.backward()
-            if args.tensorboard:
+            if args.tensorboard: ### for logging  
                 for param in model.named_parameters():
                     if param[0] is not None and param[1].grad is not None:
                         writer.add_histogram(param[0], param[1].grad, epoch)
@@ -117,9 +148,15 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
     else:
         return float('nan'), float('nan'), float('nan'), [], [], [], float('nan'),[]
 
+    # ============== 
+    # average loss, just consider the real data, without considering to padding samples. 
+    # ==============
     avg_loss = round(np.sum(losses)/np.sum(masks), 4)
     avg_sense_loss = round(np.sum(losses_sense)/np.sum(masks), 4)
 
+    # ============== 
+    # compute acc and f1 scores based on the prediction result returned in `preds` variable
+    # ==============
     avg_accuracy = round(accuracy_score(labels,preds, sample_weight=masks)*100, 2)
     avg_fscore = round(f1_score(labels,preds, sample_weight=masks, average='weighted')*100, 2)
     
@@ -127,7 +164,10 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, optimizer=None,
 
 
 if __name__ == '__main__':
-
+    
+    # ==============
+    # hype-parameters (setting for training) of this program 
+    # ==============
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--no-cuda', action='store_true', default=False, help='does not use GPU')
@@ -150,6 +190,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(args)
 
+
+    # ==============
+    # check cuda and run tensorboard (tensorboard is a library logging the learning curve values)
+    # ==============
     args.cuda = torch.cuda.is_available() and not args.no_cuda
     if args.cuda:
         print('Running on GPU')
@@ -160,14 +204,26 @@ if __name__ == '__main__':
         from tensorboardX import SummaryWriter
         writer = SummaryWriter(logdir="runs/iemocap:noselfemo-{}:seed-{}:dr-{}".format(args.no_self_attn_emotions, args.seed, args.dropout))
 
+
+    # ==============
+    # init some setting - from program input argurments => variables => training process.
+    # ==============
     emo_gru = True
     n_classes  = 6
     cuda       = args.cuda
     n_epochs   = args.epochs
     batch_size = args.batch_size
 
-    global  D_s
+    # ==============
+    # init some setting - from program input argurments => variables => training process.
+    # ==============
 
+    global  D_s # global variable, which can be used in a local function.
+
+
+    # ==============
+    # dimmenssions of features in the COSMIC framework, context, internal, external states. 
+    # ==============
     D_m = 1024
     D_s = 768
     D_g = 150
@@ -183,6 +239,9 @@ if __name__ == '__main__':
     seed = args.seed
     seed_everything(seed)
     
+    # ==============
+    # init model structure
+    # ==============
     model = CommonsenseGRUModel(D_m, D_s, D_g, D_p, D_r, D_i, D_e, D_h, D_a,
                                 n_classes=n_classes,
                                 listener_state=args.active_listener,
@@ -201,6 +260,10 @@ if __name__ == '__main__':
     if cuda:
         model.cuda()
 
+    
+    # ==============
+    # loss weights, which also is a predifined weight of weighted-F1 measurement metrics.
+    # ==============
     loss_weights = torch.FloatTensor([1/0.086747,
                                       1/0.144406,
                                       1/0.227883,
@@ -208,15 +271,25 @@ if __name__ == '__main__':
                                       1/0.127711,
                                       1/0.252668])
 
+    # ==============
+    # loss function, Negative Log Likelyhood loss 
+    # ==============
     if args.class_weight:
         loss_function  = MaskedNLLLoss(loss_weights.cuda() if cuda else loss_weights)
     else:
         loss_function = MaskedNLLLoss()
 
+    # ==============
+    # optimizer algorithms, support update learning rate via each epochs / steps
+    # ==============
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
     
     lf = open('logs/cosmic_iemocap_logs.txt', 'a')
 
+    # ==============
+    # load dataset.
+    #    => the data loaded in here cotaining training data (utterances vector representation, labels)
+    # ==============
     train_loader, valid_loader, test_loader = get_IEMOCAP_loaders(batch_size=batch_size,
                                                                   num_workers=0)
 
@@ -226,10 +299,26 @@ if __name__ == '__main__':
 
     for e in range(n_epochs):
         start_time = time.time()
-        train_loss, train_acc, _, _, _, train_fscore, _ = train_or_eval_model(model, loss_function, train_loader, e, optimizer, True)
+
+        # ==============
+        # IMPORTANT
+        # ==============
+        # train model - run forward and backward using training set
+        # 1 epoch, one time the model forward all training data, containing maybe 100 steps 
+        #   (each step is one time the model is feeded 1 mini batch)
+        # ==============
+        train_loss, train_acc, _, _, _, train_fscore, _ = train_or_eval_model(model, loss_function, train_loader, e, optimizer, train=True)
+
+
+        # ==============
+        # eval model - run forward and backward using dev and test sets
+        # ==============
         valid_loss, valid_acc, _, _, _, valid_fscore, _ = train_or_eval_model(model, loss_function, valid_loader, e)
         test_loss, test_acc, test_label, test_pred, test_mask, test_fscore, attentions = train_or_eval_model(model, loss_function, test_loader, e)
             
+        # ==============
+        # logging training values
+        # ==============
         valid_losses.append(valid_loss)
         valid_fscores.append(valid_fscore)
         test_losses.append(test_loss)
@@ -253,6 +342,10 @@ if __name__ == '__main__':
         print (x)
         lf.write(x + '\n')
 
+
+        # ==============
+        # save best model founded. 
+        # ==============
         def mkdir_fol():
             try:
                 os.mkdir('models/')
@@ -268,7 +361,10 @@ if __name__ == '__main__':
                
     if args.tensorboard:
         writer.close()
-        
+
+    # ==============
+    # eval model with best score, last time - when finished all training process.
+    # ==============
     valid_fscores = np.array(valid_fscores).transpose()
     test_fscores = np.array(test_fscores).transpose()
     
