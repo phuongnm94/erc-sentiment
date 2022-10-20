@@ -283,6 +283,11 @@ class CommonsenseRNN(nn.Module):
 
         alpha = []
         for u_, x1_, x2_, x3_, o1_, o2_, qmask_ in zip(U, x1, x2, x3, o1, o2, qmask):
+            # ============== 
+            # compute the dialoguage states. 
+            # self.dialogue_cell => this function will calculate all sthe states 
+            # and relations between them and return the states hidden vectors
+            # ============== 
             g_, q_, r_, i_, e_, alpha_ = self.dialogue_cell(u_, x1_, x2_, x3_, o1_, o2_, 
                                                             qmask_, g_hist, q_, r_, i_, e_)
             
@@ -292,14 +297,15 @@ class CommonsenseRNN(nn.Module):
             if type(alpha_)!=type(None):
                 alpha.append(alpha_[:,0,:])
 
+        # ============== 
         # add dependency between emotions 
+        # ============== 
         if self.args is not None and not self.args.no_self_attn_emotions:
             mask__ = (torch.sum(qmask, dim=2) == 0).transpose(0, 1)
             if not self_attn_print:
                 e = self.emo_attention_dep(e, src_key_padding_mask=mask__)
             else:
                 e = MyTransformerEncoderLayer.forward(self.emo_attention_dep, e, src_key_padding_mask=mask__, additional_info=additional_info)
-            # print(e1)
 
         return e, alpha # seq_len, batch, D_e
 
@@ -373,6 +379,11 @@ class CommonsenseGRUModel(nn.Module):
         qmask -> seq_len, batch, party
         """
 
+        # ============== 
+        # r1, r2, r3, r4, => is the utterance vector representations in difference layers of BERT encoders
+        # x1=xEffect, x2=xReact, x3=xIntent, 
+        # o1=oEffect, o2=oReact 
+        # ============== 
         seq_len, batch, feature_dim = r1.size()
 
         if self.norm_strategy == 1:
@@ -394,6 +405,9 @@ class CommonsenseGRUModel(nn.Module):
             r3 = self.norm3c(r3.transpose(0, 1).reshape(-1, feature_dim)).reshape(-1, seq_len, feature_dim).transpose(1, 0)
             r4 = self.norm3d(r4.transpose(0, 1).reshape(-1, feature_dim)).reshape(-1, seq_len, feature_dim).transpose(1, 0)
 
+        # ============== 
+        # r1, r2, r3, r4, => combine to get final utterance vector representations  
+        # ============== 
         if self.mode1 == 0:
             r = torch.cat([r1, r2, r3, r4], axis=-1)
         elif self.mode1 == 1:
@@ -413,11 +427,27 @@ class CommonsenseGRUModel(nn.Module):
             
         r = self.linear_in(r)
         
+        # ============== 
+        #  IMPORTANT 
+        # ============== 
+        # use custom GRU-cell `cs_rnn_f` (the cell incorporating internal state, external state, ...) to integrate context information
+        # this compute the forward time direction (utterance at time (t) to utterance at time (t+1))
+        # ============== 
         emotions_f, alpha_f = self.cs_rnn_f(r, x1, x2, x3, o1, o2, qmask, self_attn_print=not self.args.no_print_self_attn, additional_info=additional_info)
         
+        # ============== 
+        # use original RNN cell to integrate context information, 
+        # NOTE: this code is computed in here but the author not use this vector, 
+        #       it seems that this is a draft code in developing process, we should remove this line in the future. 
+        # ============== 
         out_sense, _ = self.sense_gru(x1)
-        # out_sense = self.sense_transformer(out_sense,  src_key_padding_mask=(umask==0))
-        
+
+        # ============== 
+        #  IMPORTANT 
+        # ==============
+        # use custom GRU-cell `cs_rnn_r` (the cell incorporating internal state, external state, ...) to integrate context information
+        # this compute the backward time direction (utterance at time (t+1) to utterance at time (t))
+        # ============== 
         rev_r = self._reverse_seq(r, umask)
         rev_x1 = self._reverse_seq(x1, umask)
         rev_x2 = self._reverse_seq(x2, umask)
@@ -428,13 +458,20 @@ class CommonsenseGRUModel(nn.Module):
         emotions_b, alpha_b = self.cs_rnn_r(rev_r, rev_x1, rev_x2, rev_x3, rev_o1, rev_o2, rev_qmask)
         emotions_b = self._reverse_seq(emotions_b, umask)
         
+        # ============== 
+        # connect the vector representation of utterances  on both direction 
+        # ============== 
         emotions = torch.cat([emotions_f,emotions_b],dim=-1)
-        emotions = self.dropout_rec(emotions)
         
-        # [checking]
-        # if not self.args.no_self_attn_emotions:
-        #     emotions = self.personality_encoder_layer(emotions, src_key_padding_mask=(umask==0))
+        # ============== 
+        # Dropout, prohibit the overfitting. 
+        # (just optional, the effective should be checked by experimental results if have time)
+        # ============== 
+        emotions = self.dropout_rec(emotions)
 
+        # ============== 
+        # Reduce dimmensions to get the appropriate representation vector
+        # ============== 
         alpha, alpha_f, alpha_b = [], [], []
         if att2:
             att_emotions = []
@@ -447,12 +484,18 @@ class CommonsenseGRUModel(nn.Module):
             hidden = F.relu(self.linear(att_emotions))
         else:
             hidden = F.relu(self.linear(emotions))
-            
+        
+        # ============== 
+        # Residual and dropout is two simple technique based on experimental result 
+        # ============== 
         hidden = self.dropout(hidden)
         
         if self.residual:
             hidden = hidden + r
-        
+
+        # ============== 
+        # compute the final propabilities of emotion hidden vector representation.
+        # ==============         
         log_prob = F.log_softmax(self.smax_fc(hidden), 2)
 
         if return_hidden:
