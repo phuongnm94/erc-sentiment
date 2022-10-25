@@ -127,7 +127,7 @@ if __name__ == '__main__':
     parser.add_argument('--residual', action='store_true', default=False, help='use residual connection')
     parser.add_argument('--no-self-attn-emotions', action='store_true', default=False, help='use self attn in emotions chain')
     parser.add_argument('--model_path', default='./COSMIC/erc-training/models/best_fscore2.pt', help='path of the pretrained model')
-    parser.add_argument('--no_print_self_attn', action='store_false', default=True, help='reverse flag print attention score')
+    parser.add_argument('--print-self-attn', action='store_true', default=False, help='reverse flag print attention score')
 
     args = parser.parse_args()
     print(args)
@@ -170,8 +170,8 @@ if __name__ == '__main__':
                                 args=args)
     if args.model_path is not None and len(args.model_path) > 0:
         model = torch.load(open(args.model_path, 'rb'))
-        if not hasattr(model.args, 'no_print_self_attn'):
-            model.args.no_print_self_attn = args.no_print_self_attn
+        if not hasattr(model.args, 'print_self_attn'):
+            model.args.print_self_attn = args.print_self_attn
     
     print ('IEMOCAP COSMIC Model.')
 

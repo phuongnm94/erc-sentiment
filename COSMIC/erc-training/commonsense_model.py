@@ -433,7 +433,7 @@ class CommonsenseGRUModel(nn.Module):
         # use custom GRU-cell `cs_rnn_f` (the cell incorporating internal state, external state, ...) to integrate context information
         # this compute the forward time direction (utterance at time (t) to utterance at time (t+1))
         # ============== 
-        emotions_f, alpha_f = self.cs_rnn_f(r, x1, x2, x3, o1, o2, qmask, self_attn_print=not self.args.no_print_self_attn, additional_info=additional_info)
+        emotions_f, alpha_f = self.cs_rnn_f(r, x1, x2, x3, o1, o2, qmask, self_attn_print=self.args.print_self_attn, additional_info=additional_info)
         
         # ============== 
         # use original RNN cell to integrate context information, 

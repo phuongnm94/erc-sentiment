@@ -5,6 +5,10 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn.utils.rnn import pad_sequence
 
+def config_arg(parser):
+    parser.add_argument('--no-self-attn-emotions', action='store_true', default=False, help='use self attn in emotions chain')
+    parser.add_argument('--print-self-attn', action='store_true', default=False, help='print self attention')
+
 class MaskedNLLLoss(nn.Module):
 
     def __init__(self, weight=None):

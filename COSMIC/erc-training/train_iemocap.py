@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.nn import functional as F
 from dataloader import IEMOCAPRobertaCometDataset
-from model import MaskedNLLLoss
+from model import MaskedNLLLoss, config_arg
 from commonsense_model import CommonsenseGRUModel
 from sklearn.metrics import f1_score, accuracy_score
 import os
@@ -185,7 +185,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=100, metavar='seed', help='seed')
     parser.add_argument('--norm', type=int, default=3, help='normalization strategy')
     parser.add_argument('--residual', action='store_true', default=False, help='use residual connection')
-    parser.add_argument('--no-self-attn-emotions', action='store_true', default=False, help='use self attn in emotions chain')
+    config_arg(parser)
 
     args = parser.parse_args()
     print(args)
